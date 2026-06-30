@@ -33,7 +33,10 @@ enum Cmd {
 struct Config {
     user: String,
     host: String,
-    memories: String,
+    source: String,
+    staging: String,
+    destination: String,
+    repo: String,
 }
 
 impl Config {
@@ -74,24 +77,29 @@ fn setup() -> Result<()> {
     let host = Input::<String>::new()
         .with_prompt("SSH host")
         .interact_text()?;
-    let memories = Input::<String>::new()
-        .with_prompt("Memories directory (local path)")
+    let source = Input::<String>::new()
+        .with_prompt("Source directory (local photos path)")
+        .interact_text()?;
+    let staging = Input::<String>::new()
+        .with_prompt("Staging directory (local temp path)")
+        .interact_text()?;
+    let destination = Input::<String>::new()
+        .with_prompt("Destination directory (remote path)")
+        .interact_text()?;
+    let repo = Input::<String>::new()
+        .with_prompt("Repo directory (local path to twyk repo)")
         .interact_text()?;
 
-    Config { user, host, memories }.save()
+    Config { user, host, source, staging, destination, repo }.save()
 }
 
 fn sync(config: &Config) -> Result<()> {
     let sh = Shell::new()?;
 
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let staging = PathBuf::from(&home).join("tmp/twyk");
-    let staging_str = staging.to_string_lossy().to_string();
-    let dest = format!(
-        "{}@{}:/home/pi/.local/share/com.yaneury.twyk",
-        config.user, config.host
-    );
-    let source = &config.memories;
+    let staging = PathBuf::from(&config.staging);
+    let staging_str = &config.staging;
+    let dest = format!("{}@{}:{}", config.user, config.host, config.destination);
+    let source = &config.source;
 
     fs::create_dir_all(&staging).context("failed to create staging dir")?;
 
@@ -129,16 +137,14 @@ fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
     let sh = Shell::new()?;
 
     let profile = if debug { "debug" } else { "release" };
-    let cwd = std::env::current_dir().context("failed to get cwd")?;
     let deb = format!(
         "{}/src-tauri/target/aarch64-unknown-linux-gnu/{}/bundle/deb/twyk_{}_arm64.deb",
-        cwd.to_string_lossy(),
-        profile,
-        version
+        config.repo, profile, version
     );
     let remote = config.remote();
     let debug_flag: &[&str] = if debug { &["--debug"] } else { &[] };
 
+    sh.change_dir(&config.repo);
     cmd!(sh, "cargo tauri build --target aarch64-unknown-linux-gnu --bundles deb {debug_flag...}")
         .env("PKG_CONFIG_SYSROOT_DIR", "/usr/aarch64-linux-gnu/")
         .run()?;
@@ -177,6 +183,7 @@ fn main() -> Result<()> {
         Cmd::Update => deploy(&config, "0.0.6", false)?,
         Cmd::Debug => {
             let sh = Shell::new()?;
+            sh.change_dir(&config.repo);
             let version = cmd!(sh, "git describe --tags --abbrev=0").read()?;
             let version = version.trim().trim_start_matches('v');
             deploy(&config, version, true)?;
