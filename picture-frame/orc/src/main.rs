@@ -1,5 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use dialoguer::Input;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -14,6 +16,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    #[command(about = "Configure connection settings")]
+    Setup,
     #[command(about = "Turn off the display")]
     Sleep,
     #[command(about = "Turn on the display and reboot")]
@@ -26,6 +30,7 @@ enum Cmd {
     Debug,
 }
 
+#[derive(Serialize, Deserialize)]
 struct Config {
     user: String,
     host: String,
@@ -33,17 +38,44 @@ struct Config {
 }
 
 impl Config {
-    fn from_env() -> Result<Self> {
-        Ok(Self {
-            user: env::var("TWYK_USER").context("TWYK_USER not set")?,
-            host: env::var("TWYK_HOST").context("TWYK_HOST not set")?,
-            memories: env::var("TWYK_MEMORIES").context("TWYK_MEMORIES not set")?,
-        })
+    fn path() -> Result<PathBuf> {
+        let base = dirs::config_dir().context("could not find config directory")?;
+        Ok(base.join("twyk/digital-frame/orc.toml"))
+    }
+
+    fn load() -> Result<Self> {
+        let path = Self::path()?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("config not found at {}, run `orc setup` first", path.display()))?;
+        toml::from_str(&raw).context("failed to parse config")
+    }
+
+    fn save(&self) -> Result<()> {
+        let path = Self::path()?;
+        fs::create_dir_all(path.parent().unwrap()).context("failed to create config dir")?;
+        let raw = toml::to_string_pretty(self).context("failed to serialize config")?;
+        fs::write(&path, raw).with_context(|| format!("failed to write {}", path.display()))?;
+        println!("Config saved to {}", path.display());
+        Ok(())
     }
 
     fn remote(&self) -> String {
         format!("{}@{}", self.user, self.host)
     }
+}
+
+fn setup() -> Result<()> {
+    let user = Input::<String>::new()
+        .with_prompt("SSH user")
+        .interact_text()?;
+    let host = Input::<String>::new()
+        .with_prompt("SSH host")
+        .interact_text()?;
+    let memories = Input::<String>::new()
+        .with_prompt("Memories directory (local path)")
+        .interact_text()?;
+
+    Config { user, host, memories }.save()
 }
 
 fn run(prog: &str, args: &[&str]) -> Result<()> {
@@ -176,9 +208,15 @@ fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::from_env()?;
+
+    if let Cmd::Setup = cli.command {
+        return setup();
+    }
+
+    let config = Config::load()?;
 
     match cli.command {
+        Cmd::Setup => unreachable!(),
         Cmd::Sleep => ssh(&config, "xset -d :0 dpms force off")?,
         Cmd::Wake => {
             ssh(&config, "xset -d :0 dpms force on")?;
