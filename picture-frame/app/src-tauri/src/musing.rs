@@ -23,6 +23,7 @@ pub fn fetch_all_musings_in_directory(directory: PathBuf) -> Result<Musings, Str
 
     match fs::read_to_string(directory.join(MUSINGS_FILENAME)) {
         Ok(content) => serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse musings file: {}", e)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Musings { quotes: vec![] }),
         Err(err) => Err(format!("Failed to open musings file: {}", err)),
     }
 }

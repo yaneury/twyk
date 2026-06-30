@@ -155,6 +155,9 @@ fn sync(config: &Config) -> Result<()> {
 }
 
 fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
+    if cfg!(target_os = "macos") {
+        anyhow::bail!("update/debug must be run from Linux — cross-compiling Tauri from macOS is not supported");
+    }
     let sh = Shell::new()?;
 
     let profile = if debug { "debug" } else { "release" };
