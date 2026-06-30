@@ -10,3 +10,4 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dialoguer = "0.11"
 dirs = "5"
+xshell = "0.2"

@@ -1,11 +1,10 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use xshell::{Shell, cmd};
 
 #[derive(Parser)]
 #[command(name = "orc", about = "Orchestrator for the twyk picture frame")]
@@ -45,8 +44,12 @@ impl Config {
 
     fn load() -> Result<Self> {
         let path = Self::path()?;
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("config not found at {}, run `orc setup` first", path.display()))?;
+        let raw = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "config not found at {}, run `orc setup` first",
+                path.display()
+            )
+        })?;
         toml::from_str(&raw).context("failed to parse config")
     }
 
@@ -78,52 +81,21 @@ fn setup() -> Result<()> {
     Config { user, host, memories }.save()
 }
 
-fn run(prog: &str, args: &[&str]) -> Result<()> {
-    let status = Command::new(prog)
-        .args(args)
-        .status()
-        .with_context(|| format!("failed to spawn {prog}"))?;
-    if !status.success() {
-        bail!("{prog} exited with {status}");
-    }
-    Ok(())
-}
-
-fn ssh(config: &Config, cmd: &str) -> Result<()> {
-    run("ssh", &[&config.remote(), cmd])
-}
-
-fn git_version() -> Result<String> {
-    let out = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .output()
-        .context("failed to run git describe")?;
-    if !out.status.success() {
-        bail!("git describe failed");
-    }
-    let tag = String::from_utf8(out.stdout).context("git output not utf-8")?;
-    Ok(tag.trim().trim_start_matches('v').to_string())
-}
-
 fn sync(config: &Config) -> Result<()> {
-    let home = env::var("HOME").context("HOME not set")?;
+    let sh = Shell::new()?;
+
+    let home = std::env::var("HOME").context("HOME not set")?;
     let staging = PathBuf::from(&home).join("tmp/twyk");
+    let staging_str = staging.to_string_lossy().to_string();
     let dest = format!(
         "{}@{}:/home/pi/.local/share/com.yaneury.twyk",
         config.user, config.host
     );
+    let source = &config.memories;
 
     fs::create_dir_all(&staging).context("failed to create staging dir")?;
 
-    run(
-        "rsync",
-        &[
-            "-avz",
-            "--exclude=.DS_Store",
-            &config.memories,
-            &staging.to_string_lossy(),
-        ],
-    )?;
+    cmd!(sh, "rsync -avz --exclude=.DS_Store {source} {staging_str}").run()?;
 
     for entry in fs::read_dir(&staging).context("failed to read staging dir")? {
         let entry = entry?;
@@ -142,30 +114,22 @@ fn sync(config: &Config) -> Result<()> {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("heic") {
-            let out = path.with_extension("jpg");
-            run(
-                "heif-convert",
-                &[&path.to_string_lossy(), &out.to_string_lossy()],
-            )?;
+            let input = path.to_string_lossy().to_string();
+            let output = path.with_extension("jpg").to_string_lossy().to_string();
+            cmd!(sh, "heif-convert {input} {output}").run()?;
         }
     }
 
-    run(
-        "rsync",
-        &[
-            "-avz",
-            "--exclude=*.heic",
-            &staging.to_string_lossy(),
-            &dest,
-        ],
-    )?;
+    cmd!(sh, "rsync -avz --exclude=*.heic {staging_str} {dest}").run()?;
 
     Ok(())
 }
 
 fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
+    let sh = Shell::new()?;
+
     let profile = if debug { "debug" } else { "release" };
-    let cwd = env::current_dir().context("failed to get cwd")?;
+    let cwd = std::env::current_dir().context("failed to get cwd")?;
     let deb = format!(
         "{}/src-tauri/target/aarch64-unknown-linux-gnu/{}/bundle/deb/twyk_{}_arm64.deb",
         cwd.to_string_lossy(),
@@ -173,35 +137,16 @@ fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
         version
     );
     let remote = config.remote();
+    let debug_flag: &[&str] = if debug { &["--debug"] } else { &[] };
 
-    let mut build_args = vec![
-        "tauri",
-        "build",
-        "--target",
-        "aarch64-unknown-linux-gnu",
-        "--bundles",
-        "deb",
-    ];
-    if debug {
-        build_args.push("--debug");
-    }
-
-    let status = Command::new("cargo")
-        .args(&build_args)
+    cmd!(sh, "cargo tauri build --target aarch64-unknown-linux-gnu --bundles deb {debug_flag...}")
         .env("PKG_CONFIG_SYSROOT_DIR", "/usr/aarch64-linux-gnu/")
-        .status()
-        .context("failed to spawn cargo")?;
-    if !status.success() {
-        bail!("cargo tauri build failed");
-    }
+        .run()?;
 
-    run(
-        "scp",
-        &[&deb, &format!("{remote}:/home/pi/downloads/twyk.deb")],
-    )?;
-    ssh(config, "sudo dpkg -i /home/pi/downloads/twyk.deb")?;
-    ssh(config, "rm /home/pi/downloads/twyk.deb")?;
-    ssh(config, "sudo reboot")?;
+    cmd!(sh, "scp {deb} {remote}:/home/pi/downloads/twyk.deb").run()?;
+    cmd!(sh, "ssh {remote} sudo dpkg -i /home/pi/downloads/twyk.deb").run()?;
+    cmd!(sh, "ssh {remote} rm /home/pi/downloads/twyk.deb").run()?;
+    cmd!(sh, "ssh {remote} sudo reboot").run()?;
 
     Ok(())
 }
@@ -217,16 +162,24 @@ fn main() -> Result<()> {
 
     match cli.command {
         Cmd::Setup => unreachable!(),
-        Cmd::Sleep => ssh(&config, "xset -d :0 dpms force off")?,
+        Cmd::Sleep => {
+            let sh = Shell::new()?;
+            let remote = config.remote();
+            cmd!(sh, "ssh {remote} xset -d :0 dpms force off").run()?;
+        }
         Cmd::Wake => {
-            ssh(&config, "xset -d :0 dpms force on")?;
-            ssh(&config, "sudo reboot")?;
+            let sh = Shell::new()?;
+            let remote = config.remote();
+            cmd!(sh, "ssh {remote} xset -d :0 dpms force on").run()?;
+            cmd!(sh, "ssh {remote} sudo reboot").run()?;
         }
         Cmd::Sync => sync(&config)?,
         Cmd::Update => deploy(&config, "0.0.6", false)?,
         Cmd::Debug => {
-            let version = git_version()?;
-            deploy(&config, &version, true)?;
+            let sh = Shell::new()?;
+            let version = cmd!(sh, "git describe --tags --abbrev=0").read()?;
+            let version = version.trim().trim_start_matches('v');
+            deploy(&config, version, true)?;
         }
     }
 
