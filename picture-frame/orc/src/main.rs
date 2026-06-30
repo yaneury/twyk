@@ -4,7 +4,6 @@ use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use uuid::Uuid;
 use walkdir::WalkDir;
 use xshell::{Shell, cmd};
 
@@ -97,6 +96,15 @@ fn setup() -> Result<()> {
 
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "heic", "heif", "tiff", "gif", "webp"];
 
+fn imagemagick_cmd() -> &'static str {
+    let available = std::process::Command::new("magick")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if available { "magick" } else { "convert" }
+}
+
 fn sync(config: &Config) -> Result<()> {
     let sh = Shell::new()?;
 
@@ -105,6 +113,9 @@ fn sync(config: &Config) -> Result<()> {
     let staging_str = &config.staging;
     let dest = format!("{}@{}:{}", config.user, config.host, config.destination);
 
+    if staging.exists() {
+        fs::remove_dir_all(&staging).context("failed to clear staging dir")?;
+    }
     fs::create_dir_all(&staging).context("failed to create staging dir")?;
 
     for entry in WalkDir::new(&source).into_iter().filter_map(|e| e.ok()) {
@@ -120,7 +131,8 @@ fn sync(config: &Config) -> Result<()> {
         if !IMAGE_EXTENSIONS.contains(&ext.as_str()) {
             continue;
         }
-        let name = format!("{}.{}", Uuid::new_v4(), ext);
+        let hash = format!("{:x}", md5::compute(fs::read(path)?));
+        let name = format!("{}.{}", hash, ext);
         fs::copy(path, staging.join(name))?;
     }
 
@@ -129,12 +141,15 @@ fn sync(config: &Config) -> Result<()> {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("heic") {
             let input = path.to_string_lossy().to_string();
-            let output = path.with_extension("jpg").to_string_lossy().to_string();
-            cmd!(sh, "heif-convert {input} {output}").run()?;
+            let output = path.with_extension("jpeg").to_string_lossy().to_string();
+            let im = imagemagick_cmd();
+            cmd!(sh, "{im} {input} {output}").run()?;
+            fs::remove_file(&path)?;
         }
     }
 
-    cmd!(sh, "rsync -avz --exclude=*.heic {staging_str} {dest}").run()?;
+    let staging_src = format!("{}/", staging_str.trim_end_matches('/'));
+    cmd!(sh, "rsync -avz --ignore-existing --exclude=*.heic --exclude=*.heif {staging_src} {dest}").run()?;
 
     Ok(())
 }
