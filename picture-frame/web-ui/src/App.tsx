@@ -7,12 +7,12 @@ import {
 import {
   DirNode, FileInfo, SyncStatus,
   getTree, getState, setState, triggerSync, getSyncStatus,
-  listFiles, imageUrl, uploadFiles, deleteFile, createDirectory,
+  listFiles, imageUrl, uploadFiles, deleteFile, createDirectory, deleteDirectory,
 } from './api';
 
 function TreeNode({
   node, depth, activeDir, selectedDir, hoveredPath, pendingDir,
-  onHover, onSetPending, onSelect,
+  onHover, onSetPending, onSelect, onDeleteDir,
 }: {
   node: DirNode;
   depth: number;
@@ -23,6 +23,7 @@ function TreeNode({
   onHover: (p: string | null) => void;
   onSetPending: (p: string) => void;
   onSelect: (p: string) => void;
+  onDeleteDir: (p: string) => void;
 }) {
   const [open, setOpen] = useState(depth < 1);
   const isActive = node.path === activeDir;
@@ -110,17 +111,27 @@ function TreeNode({
             padding: '1px 5px', flexShrink: 0,
           }}>PENDING</span>
         )}
-        {!isActive && !isPending && isHovered && isLeaf && (
-          <button
-            onClick={e => { e.stopPropagation(); onSetPending(node.path); }}
-            style={{
-              fontSize: '10px', fontWeight: 500, color: '#64748b',
-              backgroundColor: 'rgba(255,255,255,0.06)',
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: '3px',
-              padding: '1px 7px', cursor: 'pointer', flexShrink: 0,
-              fontFamily: "'Inter', sans-serif",
-            }}
-          >Set Active</button>
+        {isHovered && !isPending && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+            {!isActive && isLeaf && (
+              <button
+                onClick={e => { e.stopPropagation(); onSetPending(node.path); }}
+                style={{
+                  fontSize: '10px', fontWeight: 500, color: '#64748b',
+                  backgroundColor: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.1)', borderRadius: '3px',
+                  padding: '1px 7px', cursor: 'pointer',
+                  fontFamily: "'Inter', sans-serif",
+                }}
+              >Set Active</button>
+            )}
+            <button
+              onClick={e => { e.stopPropagation(); onDeleteDir(node.path); }}
+              style={{ display: 'flex', alignItems: 'center', padding: '2px 4px', backgroundColor: 'transparent', border: 'none', cursor: 'pointer', color: '#4b5563', borderRadius: '3px' }}
+            >
+              <Trash2 size={11} />
+            </button>
+          </div>
         )}
       </div>
       {open && hasChildren && node.children.map(child => (
@@ -135,6 +146,7 @@ function TreeNode({
           onHover={onHover}
           onSetPending={onSetPending}
           onSelect={onSelect}
+          onDeleteDir={onDeleteDir}
         />
       ))}
     </div>
@@ -257,6 +269,9 @@ export function App() {
   const [creatingDir, setCreatingDir] = useState(false);
   const newDirRef = useRef<HTMLInputElement>(null);
 
+  const [deletingDir, setDeletingDir] = useState<string | null>(null);
+  const [confirmingDirDelete, setConfirmingDirDelete] = useState(false);
+
   const loadAll = () => {
     setLoadError(null);
     Promise.all([getTree(), getState(), getSyncStatus()])
@@ -332,6 +347,28 @@ export function App() {
     }
   };
 
+  const handleResync = async () => {
+    if (syncStatus.running) return;
+    try {
+      await triggerSync();
+      setSyncStatus({ running: true, last_error: null });
+    } catch { /* ignore */ }
+  };
+
+  const handleConfirmDirDelete = async () => {
+    if (!deletingDir || confirmingDirDelete) return;
+    setConfirmingDirDelete(true);
+    try {
+      await deleteDirectory(deletingDir);
+      if (selectedDir === deletingDir) { setSelectedDir(null); setFiles([]); }
+      if (activeDir === deletingDir) setActiveDir(null);
+      setDeletingDir(null);
+      loadAll();
+    } catch { /* ignore */ } finally {
+      setConfirmingDirDelete(false);
+    }
+  };
+
   const handleConfirmSync = async () => {
     if (!pendingDir || confirming) return;
     setConfirming(true);
@@ -402,8 +439,21 @@ export function App() {
               <span style={{ fontSize: '12px', color: activeDir ? '#60a5fa' : '#374151', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {activeDir ? formatName(activeDir) : 'None'}
               </span>
-              {activeDir && !syncStatus.running && (
-                <CheckCircle2 size={11} style={{ color: '#22c55e', flexShrink: 0, marginLeft: 'auto' }} />
+              {activeDir && (
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  {syncStatus.running
+                    ? <Loader2 size={11} style={{ color: '#f59e0b', animation: 'spin 1s linear infinite' }} />
+                    : <CheckCircle2 size={11} style={{ color: '#22c55e' }} />
+                  }
+                  <button
+                    onClick={handleResync}
+                    disabled={syncStatus.running}
+                    title="Re-sync active folder to frame"
+                    style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: '10px', color: syncStatus.running ? '#374151' : '#64748b', backgroundColor: 'rgba(255,255,255,0.04)', border: '1px solid #21262d', borderRadius: '3px', padding: '2px 6px', cursor: syncStatus.running ? 'default' : 'pointer' }}
+                  >
+                    <RefreshCw size={9} /> Sync
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -470,6 +520,7 @@ export function App() {
                       onHover={setHoveredPath}
                       onSetPending={setPendingDir}
                       onSelect={handleSelect}
+                      onDeleteDir={setDeletingDir}
                     />
                   ))
                 : <div style={{ padding: '16px', fontSize: '12px', color: '#374151', textAlign: 'center' }}>No subdirectories found</div>
@@ -557,6 +608,28 @@ export function App() {
           )}
         </div>
       </div>
+
+      {/* Delete directory confirm bar */}
+      {deletingDir && (
+        <div style={{
+          borderTop: '1px solid rgba(239,68,68,0.3)', backgroundColor: 'rgba(239,68,68,0.08)',
+          padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
+        }}>
+          <Trash2 size={13} style={{ color: '#ef4444', flexShrink: 0 }} />
+          <span style={{ flex: 1, fontSize: '12px', color: '#94a3b8', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            Delete <span style={{ color: '#fca5a5' }}>{formatName(deletingDir)}</span> and all its photos?
+          </span>
+          <button
+            onClick={() => setDeletingDir(null)}
+            style={{ fontSize: '11px', color: '#6b7280', backgroundColor: 'transparent', border: '1px solid #21262d', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer' }}
+          >Cancel</button>
+          <button
+            onClick={handleConfirmDirDelete}
+            disabled={confirmingDirDelete}
+            style={{ fontSize: '11px', color: '#fff', backgroundColor: confirmingDirDelete ? '#7f1d1d' : '#dc2626', border: 'none', borderRadius: '4px', padding: '4px 14px', cursor: confirmingDirDelete ? 'default' : 'pointer', fontWeight: 500 }}
+          >{confirmingDirDelete ? 'Deleting…' : 'Delete Folder'}</button>
+        </div>
+      )}
 
       {/* Confirm bar */}
       {pendingDir && (

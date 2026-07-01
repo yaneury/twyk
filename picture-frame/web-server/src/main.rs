@@ -373,6 +373,35 @@ async fn create_directory(
     }
 }
 
+async fn delete_directory(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let path_str = match params.get("path") {
+        Some(p) => p.clone(),
+        None => return err400("missing path param").into_response(),
+    };
+    let path = PathBuf::from(&path_str);
+    let source = PathBuf::from(&state.config.source);
+    if let Err(e) = validate_under_source(&path, &source) {
+        return e.into_response();
+    }
+    let relative = match path.strip_prefix(&source) {
+        Ok(r) => r,
+        Err(_) => return err400("path must be under source directory").into_response(),
+    };
+    if relative.components().count() != 1 {
+        return err400("can only delete top-level directories").into_response();
+    }
+    if !path.is_dir() {
+        return err400("path is not a directory").into_response();
+    }
+    match std::fs::remove_dir_all(&path) {
+        Ok(()) => (StatusCode::OK, Json(json!({ "ok": true }))).into_response(),
+        Err(e) => err500(e.into()).into_response(),
+    }
+}
+
 async fn delete_file(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -421,7 +450,7 @@ async fn main() -> Result<()> {
         .route("/api/image", get(serve_image))
         .route("/api/upload", post(upload_files).layer(DefaultBodyLimit::max(200 * 1024 * 1024)))
         .route("/api/file", delete(delete_file))
-        .route("/api/directory", post(create_directory))
+        .route("/api/directory", post(create_directory).delete(delete_directory))
         .nest_service("/", serve_dir)
         .layer(CorsLayer::permissive())
         .with_state(app_state);

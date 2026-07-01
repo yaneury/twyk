@@ -76,3 +76,7 @@ export const createDirectory = (name: string): Promise<{ path: string }> =>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   }).then(check).then(r => r.json());
+
+export const deleteDirectory = (path: string): Promise<void> =>
+  fetch(`/api/directory?path=${encodeURIComponent(path)}`, { method: 'DELETE' })
+    .then(check).then(() => undefined);
