@@ -18,6 +18,8 @@ struct Cli {
 enum Cmd {
     #[command(about = "Configure connection settings")]
     Setup,
+    #[command(about = "Print the config file path")]
+    Config,
     #[command(about = "Turn off the display")]
     Sleep,
     #[command(about = "Turn on the display and reboot")]
@@ -155,25 +157,25 @@ fn sync(config: &Config) -> Result<()> {
 }
 
 fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
-    if cfg!(target_os = "macos") {
-        anyhow::bail!("update/debug must be run from Linux — cross-compiling Tauri from macOS is not supported");
-    }
     let sh = Shell::new()?;
-
-    let profile = if debug { "debug" } else { "release" };
-    let deb = format!(
-        "{}/src-tauri/target/aarch64-unknown-linux-gnu/{}/bundle/deb/twyk_{}_arm64.deb",
-        config.repo, profile, version
-    );
     let remote = config.remote();
-    let debug_flag: &[&str] = if debug { &["--debug"] } else { &[] };
+    let repo = &config.repo;
+    let image = "twyk-cross:latest";
+    let profile = if debug { "debug" } else { "release" };
+    let deb_in_vol = format!("{}/bundle/deb/twyk_{}_arm64.deb", profile, version);
+    let local_deb = format!("{}/twyk_{}_arm64.deb", repo, version);
+    let dockerfile = format!("{}/picture-frame/Dockerfile.cross", repo);
+    let debug_flag = if debug { "--debug" } else { "" };
+    let build_cmd = format!(
+        "cd /app/picture-frame/app && npm install && npx tauri build --bundles deb {}",
+        debug_flag
+    );
 
-    sh.change_dir(&config.repo);
-    cmd!(sh, "cargo tauri build --target aarch64-unknown-linux-gnu --bundles deb {debug_flag...}")
-        .env("PKG_CONFIG_SYSROOT_DIR", "/usr/aarch64-linux-gnu/")
-        .run()?;
+    cmd!(sh, "docker build -f {dockerfile} -t {image} {repo}").run()?;
+    cmd!(sh, "docker run --rm -v {repo}:/app -v twyk-target:/app/picture-frame/app/src-tauri/target {image} sh -c {build_cmd}").run()?;
+    cmd!(sh, "docker run --rm -v twyk-target:/vol -v {repo}:/host alpine cp /vol/{deb_in_vol} /host/twyk_{version}_arm64.deb").run()?;
 
-    cmd!(sh, "scp {deb} {remote}:/home/pi/downloads/twyk.deb").run()?;
+    cmd!(sh, "scp {local_deb} {remote}:/home/pi/downloads/twyk.deb").run()?;
     cmd!(sh, "ssh {remote} sudo dpkg -i /home/pi/downloads/twyk.deb").run()?;
     cmd!(sh, "ssh {remote} rm /home/pi/downloads/twyk.deb").run()?;
     cmd!(sh, "ssh {remote} sudo reboot").run()?;
@@ -184,14 +186,19 @@ fn deploy(config: &Config, version: &str, debug: bool) -> Result<()> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Cmd::Setup = cli.command {
-        return setup();
+    match cli.command {
+        Cmd::Setup => return setup(),
+        Cmd::Config => {
+            println!("{}", Config::path()?.display());
+            return Ok(());
+        }
+        _ => {}
     }
 
     let config = Config::load()?;
 
     match cli.command {
-        Cmd::Setup => unreachable!(),
+        Cmd::Setup | Cmd::Config => unreachable!(),
         Cmd::Sleep => {
             let sh = Shell::new()?;
             let remote = config.remote();
