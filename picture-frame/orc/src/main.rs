@@ -156,6 +156,9 @@ fn sync(config: &Config, directory: Option<String>) -> Result<()> {
     let staging_src = format!("{}/", staging_str.trim_end_matches('/'));
     cmd!(sh, "rsync -avz --delete --exclude=*.heic --exclude=*.heif {staging_src} {dest}").run()?;
 
+    let remote = config.remote();
+    cmd!(sh, "ssh {remote} sh -c 'pkill -x twyk; true'").run()?;
+
     Ok(())
 }
 
